@@ -1,0 +1,673 @@
+---
+title: 'E109 Project: Predicting NFL Game Outcomes'
+author: "E109 Group, including Eric R. Louderback, Parmjit Dhillon and Rami Harb"
+output:
+  pdf_document: default
+  html_document:
+    self_contained: false
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r 'setup', echo = FALSE, cache = FALSE, include = TRUE}
+    
+#setting markdown options
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(dev = c('pdf', 'png'), 
+        fig.align = 'center', fig.height = 5, fig.width = 8.5, 
+        pdf.options(encoding = "ISOLatin9.enc"))
+
+#setting option to not use scientific notation
+options(scipen = 1000000000)
+
+#loading required packages
+library(tidyverse)
+library(DAAG)
+library(psych)
+library(caret)
+library(pROC)
+library(randomForest)
+library(readr)
+library(nflfastR)
+library(summarytools)
+library(corx)
+library(ggplot2)
+library(MASS)
+```
+
+## Loading Datasets
+
+```{r Loading Datasets}
+#loading game win/loss and temperature data from nflfastR package online API
+nfl_plays20_21_22 <- load_pbp(2020:2021)
+
+#loading salary and elevation data from excel table from file for 2020
+nfl_salary_elevation_2020 <- readxl::read_excel(path = "C:/Users/erlfo/Dropbox/Harvard Coursework/schooldocs/E109/GroupProject/NFL_team_salary_and_elevation_2020.xlsx")
+
+#downloading team data for coaches for 2020
+nfl_coach_data_2020 <- readxl::read_excel(path = "C:/Users/erlfo/Dropbox/Harvard Coursework/schooldocs/E109/GroupProject/NFL_head_coach_data_2020_career_only.xlsx")
+```
+
+## Examining, Cleaning and Merging Data
+
+```{r Examining Cleaning and Merging Data}
+#checking data structures
+str(nfl_plays20_21_22)
+
+#checking head and tail of data
+head(nfl_plays20_21_22)
+
+#calculating descriptive statistics
+#for all variables
+#psych::describe(nfl_plays20_21_22)
+
+#examing game-level data only
+length(unique(nfl_plays20_21_22$game_id))
+str(nfl_plays20_21_22$game_date)
+
+#extracting year only from date and creating
+#new variable for year
+nfl_plays20_21_22$game_year <- as.numeric(substr(nfl_plays20_21_22$game_date, 
+                                         start = 1, stop = 4))
+#checking new variable
+table(nfl_plays20_21_22[,c("game_date","game_year")])
+
+#checking number of plays and games per year
+summarytools::freq(nfl_plays20_21_22$game_year)
+
+#2020 games only
+nfl_plays20 <- subset(nfl_plays20_21_22, game_year == 2020)
+length(unique(nfl_plays20$game_id))
+
+#2021 games
+nfl_plays21 <- subset(nfl_plays20_21_22, game_year == 2021)
+length(unique(nfl_plays21$game_id))
+
+#2022 games
+nfl_plays22 <- subset(nfl_plays20_21_22, game_year == 2022)
+length(unique(nfl_plays22$game_id))
+
+#there are 509 total games in the dataset for 2020 and 2021, 
+#with 240 games in the 2020 season and 269 games in the 2021 season
+sum(length(unique(nfl_plays20$game_id)),
+    length(unique(nfl_plays21$game_id)))
+
+#removing 2022 games from dataset
+#so only 2020 and 2021 games are left
+nfl_plays20_21 <- subset(nfl_plays20_21_22, game_year == 2020 | game_year == 2021)
+
+#reshaping data to only include game-level data
+nfl_games_20_21 <- nfl_plays20_21 %>%
+  dplyr::select(c("game_id","game_date","home_team","away_team","season_type",
+                             "week","start_time","stadium","weather","temp",
+                             "away_score","home_score","location",
+                             "result","div_game","roof","surface","home_coach",
+                             "away_coach","home_opening_kickoff")) %>%
+  distinct()
+
+#creating binary variable for home team won game
+nfl_games_20_21$homewon <- ifelse(nfl_games_20_21$home_score > nfl_games_20_21$away_score,
+                                  1,
+                                  0)
+
+#checking new variable
+test <- data.frame(nfl_games_20_21$homewon,
+                   nfl_games_20_21$home_score,
+                   nfl_games_20_21$away_score)
+head(test)
+
+
+#creating binary variable for away team won game
+nfl_games_20_21$awaywon <- ifelse(nfl_games_20_21$away_score > nfl_games_20_21$home_score,
+                                  1,
+                                  0)
+
+#checking new variable
+test <- data.frame(nfl_games_20_21$awaywon,
+                   nfl_games_20_21$home_score,
+                   nfl_games_20_21$away_score)
+head(test)
+
+#creating new temperature variable using string extraction
+nfl_games_20_21$temp_new <- as.numeric(str_extract(substr(x = sub(".*Temp: ", "", 
+                                                                  nfl_games_20_21$weather), 
+                                                          start = 1, stop = 4), 
+                                                   "\\d+"))
+
+#checking new temperature variable
+test <- nfl_games_20_21[,c("weather",
+                           "temp_new")]
+
+head(test)
+
+#creating new humidity variable using string extraction
+nfl_games_20_21$humidity <- as.numeric(str_extract(substr(x = sub(".*Humidity: ", "", 
+                                                                  nfl_games_20_21$weather), 
+                                                          start = 1, stop = 4), 
+                                                   "\\d+"))
+
+#checking new humidity variable
+test <- nfl_games_20_21[,c("weather",
+                           "temp_new",
+                           "humidity")]
+
+
+#merging in data for home and away teams for additional variables
+
+#creating variables to match in datasets to merge in to
+#original game-level data for 2020 and 2021
+#with left join
+
+#salary and elevation data table
+nfl_salary_elevation_2020$home_team <- nfl_salary_elevation_2020$team_abbrv
+nfl_salary_elevation_2020$away_team <- nfl_salary_elevation_2020$team_abbrv
+
+#head coach data table
+nfl_coach_data_2020$home_team <- nfl_coach_data_2020$Tm
+nfl_coach_data_2020$away_team <- nfl_coach_data_2020$Tm
+
+#need to merge in both salary and elevation data table 
+#and head coach career length data table
+
+#for home team and salary data table
+nfl_games_20_21_merged_home <- merge(x = nfl_games_20_21,
+                                y = nfl_salary_elevation_2020,
+                                by = "home_team",
+                                all.x = TRUE)
+
+#for away team and salary data table
+nfl_games_20_21_merged_away <- merge(nfl_games_20_21,
+                                y = nfl_salary_elevation_2020,
+                                by = "away_team",
+                                all.x = TRUE)
+
+#creating plots of coach data
+ggplot(data= nfl_coach_data_2020, aes(x= reorder(Coach, W), y= W )) +
+    geom_bar(stat="identity", width=0.5, fill="blue") +
+    labs(title = "Coach Career Wins", x="Coach", y="Number of Wins") + 
+  theme(plot.title = element_text(hjust = 0.5)) + coord_flip()
+
+ggplot(data= nfl_coach_data_2020, aes(x= reorder(Coach, L), y= L )) +
+    geom_bar(stat="identity", width=0.5, fill="blue") +
+    labs(title = "Coach Career Losses", x="Coach", y="Number of Losses") + 
+  theme(plot.title = element_text(hjust = 0.5)) + coord_flip()
+
+#remove coaches fired during season to avoid duplicate Head Coaches
+nfl_coach_data_2020_cleaned <- nfl_coach_data_2020[(!(nfl_coach_data_2020$Coach == "Dan Quinn") & 
+                                                    !(nfl_coach_data_2020$Coach == "Matt Patricia") & 
+                                                    !(nfl_coach_data_2020$Coach == "Bill O'Brien")),]
+
+#print original and cleaned datasets
+nfl_coach_data_2020
+nfl_coach_data_2020_cleaned
+
+#for home team and head coach data table
+nfl_games_20_21_merged_home2 <- merge(nfl_games_20_21_merged_home,
+                                y = nfl_coach_data_2020_cleaned,
+                                by = "home_team",
+                                all.x = TRUE)
+
+#for away team and head coach data table
+nfl_games_20_21_merged_away2 <- merge(nfl_games_20_21_merged_away,
+                                y = nfl_coach_data_2020_cleaned,
+                                by = "away_team",
+                                all.x = TRUE)
+
+#excluding non-relevant variable "Remark", "temp" and "roof" 
+#with lots of missing values
+nfl_games_20_21_merged_home2 <- subset(nfl_games_20_21_merged_home2, 
+                                       select = -c(temp, roof, Remark))
+nfl_games_20_21_merged_away2 <- subset(nfl_games_20_21_merged_away2, 
+                                       select = -c(temp, roof, Remark))
+
+#subsetting to only available data with listwise deletion
+nfl_games_20_21_merged_home2 <- na.omit(nfl_games_20_21_merged_home2)
+nfl_games_20_21_merged_away2 <- na.omit(nfl_games_20_21_merged_away2)
+
+#writing final cleaned datasets to Excel files to share in case
+#they are needed at a later date
+
+#home wins dataset
+write_excel_csv(nfl_games_20_21_merged_home2,
+                file = "C:/Users/erlfo/Dropbox/Harvard Coursework/schooldocs/E109/GroupProject/NFL_games_coaches_salary_merged_homewins_2020_2021.xls")
+
+#away wins dataset
+write_excel_csv(nfl_games_20_21_merged_away2,
+                file = "C:/Users/erlfo/Dropbox/Harvard Coursework/schooldocs/E109/GroupProject/NFL_games_coaches_salary_merged_awaywins_2020_2021.xls")
+
+```
+## Running Descriptive Statistics and Correlations, and Creating Figures
+
+```{r Descriptives, Correlation and Figures}
+data <- nfl_games_20_21_merged_home2
+
+#checking data structures
+str(data)
+
+#descriptive statistics for all variables for home team dataset
+print.data.frame(psych::describe(data), digits = 2)
+
+#save descriptive statistics to file
+write.csv(print.data.frame(psych::describe(data), digits = 2), file = "descriptives1.csv")
+
+#Correlation for key predictor variables
+corx(data[,c("homewon","active","G","W","avg_age","humidity", "temp_new")], 
+     triangle = "lower")
+
+#save correlations to file
+write.csv(corx(data[,c("homewon","active","G","W","avg_age","humidity", "temp_new")], 
+     triangle = "lower"), file = "correlations1.csv")
+
+#boxplots
+
+library(scales)
+data %>% ggplot(aes(x= factor(homewon), y =active , col = factor(homewon))) +
+  geom_boxplot()+stat_summary(fun.y="mean", color=("red"), shape=25, fill="red")+
+   theme(text = element_text(size = 20))+ 
+	scale_y_continuous(labels = label_number(suffix = " M", scale = 1e-6))+
+ylab('Money Spent on Players')+
+  xlab('Home Win')
+
+
+data %>% ggplot(aes(x= factor(homewon), y =G , col = factor(homewon))) +
+  geom_boxplot()+stat_summary(fun.y="mean", color=("red"), shape=25, fill="red")+
+   theme(text = element_text(size = 20))+
+  ylab('Num. of Games for head Coach')+
+  xlab('Home Win')
+
+
+data %>% ggplot(aes(x= factor(homewon), y =W , col = factor(homewon))) +
+  geom_boxplot()+stat_summary(fun.y="mean", color=("red"), shape=25, fill="red")+
+   theme(text = element_text(size = 20))+ ylab('Wins by head Coach')+
+  xlab('Home Win')
+
+
+data %>% ggplot(aes(x= factor(homewon), y =avg_age , col = factor(homewon))) +
+  geom_boxplot()+stat_summary(fun.y="mean", color=("red"), shape=25, fill="red")+
+   theme(text = element_text(size = 20))+  ylab('Avg. Age of Players')+
+  xlab('Home Win')
+
+
+data %>% ggplot(aes(x= factor(homewon), y =humidity , col = factor(homewon))) +
+  geom_boxplot()+stat_summary(fun.y="mean", color=("red"), shape=25, fill="red")+
+   theme(text = element_text(size = 20))+  ylab('Humidity')+
+  xlab('Home Win')
+
+
+data %>% ggplot(aes(x= factor(homewon), y =temp_new , col = factor(homewon))) +
+  geom_boxplot()+stat_summary(fun.y="mean", color=("red"), shape=25, fill="red")+
+   theme(text = element_text(size = 20))+  ylab('Temperature')+
+  xlab('Home Win')
+
+
+
+#histograms
+
+data %>% ggplot(aes(x = active, fill = factor(homewon))) +
+  geom_density(alpha = 0.5, color = 'black') +
+  ggtitle('Money Spent on Players')+ 	scale_x_continuous(labels = label_number(suffix = " M", scale = 1e-6))+
+xlab('Money Spent on Players')+ylab('Density')
+  
+
+data %>% ggplot(aes(x = G, fill = factor(homewon))) +
+  geom_density(alpha = 0.5, color = 'black') +
+  ggtitle('Num. of Games for head Coach')+ 	
+xlab('Num. of Games for head Coach')+ylab('Density')
+
+
+data %>% ggplot(aes(x = W, fill = factor(homewon))) +
+  geom_density(alpha = 0.5, color = 'black') +
+  ggtitle('Wins by head Coach')+ 	
+xlab('Wins by head Coach')+ylab('Density')
+
+
+data %>% ggplot(aes(x = avg_age, fill = factor(homewon))) +
+  geom_density(alpha = 0.5, color = 'black') +
+  ggtitle('Avg. Age of Players')+ 	
+xlab('Avg. Age of Players')+ylab('Density')
+
+
+data %>% ggplot(aes(x = humidity, fill = factor(homewon))) +
+  geom_density(alpha = 0.5, color = 'black') +
+  ggtitle('Humidity')+ 	
+xlab('Humidity')+ylab('Density')
+
+
+data %>% ggplot(aes(x = temp_new, fill = factor(homewon))) +
+  geom_density(alpha = 0.5, color = 'black') +
+  ggtitle('Temperature')+ 	
+xlab('Temperature')+ylab('Density')
+
+```
+
+## Setting Up Data, Setting Outcome as Factor and Identifying All Features
+
+```{r Setting Up Data, Factoring Outcome and Feature Identification}
+#loading additional package to run
+#stepwise logistic regression for
+#selecting significant features
+library(MASS)
+
+#and load lime package to create explainer
+#for black box models
+library(lime)
+
+#recoding outcomes as factor variables and
+#renaming data to short name of NFL_home and NFL_away
+data$homewon <- as.factor(data$homewon)
+
+#examining frequencies for new factored outcome variable
+freq(data$homewon)
+
+#printing numeric variable names for regression equation
+cat(names(Filter(is.numeric, data)), sep = " + ")
+
+#week + temp + away_score + home_score + result + div_game + home_opening_kickoff + temp_new + humidity + signed + avg_age + active + dead + top_51_cap + cap_space...8 + total_cap + cap_space...10 + stad_elev_ft + G + W + L + T
+```
+
+## Fitting Logistic Regression and Identifying Optimal Models with Stepwise Regression
+
+```{r Logistic Regression and Optimal Model Identification}
+################### Logistic Regression ###########################
+
+# Split data
+set.seed(1234)
+ind <- sample(2, nrow(data), replace = T, prob = c(0.8, 0.2))
+trainNFL <- data[ind == 1,]
+testNFL <- data[ind == 2,]
+
+#summarizing data in training and testing dataset for predicting
+#home team wins game
+psych::describe(trainNFL)
+psych::describe(testNFL)
+
+# Logistic regression for numeric variables only
+m <- glm(homewon ~ week + div_game + home_opening_kickoff + temp_new + humidity + avg_age + 
+           active + stad_elev_ft + G + W, data = trainNFL, family = 'binomial'(link = "logit"))
+
+summary(m)
+
+#identify optimal model with forward and backwards stepwise models
+model <- stepAIC(m, direction = "both", trace = F)
+
+#print optimal model
+summary(model)
+
+#calculate odds ratios and confidence intervals for optimal model
+round(exp(cbind(coef(model), confint(model))), digits = 2) 
+
+# CM - train
+p1 <- predict(model, trainNFL, type = 'response')
+pred1 <- ifelse(p1 > 0.5, 1, 0)
+table(Predicted = pred1, Actual = trainNFL$homewon)
+
+#confusion matrix for training dataset
+confusionMatrix(factor(pred1), factor(trainNFL$homewon), 
+                positive = '1')
+
+# CM - test
+p2 <- predict(model, testNFL, type = 'response')
+pred2 <- ifelse(p2 > 0.5, 1, 0)
+table(Predicted = pred2, Actual = testNFL$homewon)
+
+#confusion matrix for testing dataset
+confusionMatrix(factor(pred2), factor(testNFL$homewon), 
+                positive = '1')
+
+
+# ROC for training dataset
+r <- multiclass.roc(trainNFL$homewon, p1, percent = TRUE)
+roc <- r[['rocs']]
+r1 <- roc[[1]]
+plot.roc(r1,
+         col = 'red',
+         lwd = 5,
+         main = 'ROC Curve for Train Data with Logistic Regression',
+         cex.title = 0.8,
+         print.auc = T,
+         auc.polygon = T,
+         grid = c(0.1, 0.2),
+         grid.col = c('green', 'red'),
+         max.auc.polygon = T,
+         auc.polygon.col = 'lightblue',
+         print.thres = "best",
+         print.thres.best.method = "closest.topleft",
+         print.auc.adj=c(0.5,8.5))
+
+
+# ROC for testing dataset
+r <- multiclass.roc(testNFL$homewon, p2, percent = TRUE)
+roc <- r[['rocs']]
+r2 <- roc[[1]]
+plot.roc(r2,
+         col = 'red',
+         lwd = 5,
+         main = 'ROC Curve for Testing Data with Logistic Regression',
+         cex.title = 0.8,
+         print.auc = T,
+         auc.polygon = T,
+         grid = c(0.1, 0.2),
+         grid.col = c('green', 'red'),
+         max.auc.polygon = T,
+         auc.polygon.col = 'lightblue',
+         print.thres = "best",
+         print.thres.best.method = "closest.topleft",
+         print.auc.adj=c(0.5,8.5))
+
+```
+
+## Tree Models with Bagging, Random Forest Models and Extreme Gradient Boosted Models
+
+```{r Tree, Random Forest and XGB Models}
+################### Classification Trees##############################
+
+# Bagging
+set.seed(1234) 
+cvcontrol <- trainControl(method="repeatedcv", 
+                          number = 10,
+                          repeats = 1,
+                          allowParallel = TRUE)
+set.seed(1234)
+bag <- train(homewon ~ week + div_game + home_opening_kickoff + temp_new + humidity + avg_age + 
+           active + stad_elev_ft + G + W, 
+             data = trainNFL,
+             method = "treebag",
+             trControl = cvcontrol,
+             importance = TRUE)
+
+#print tree summary and variable importance plot
+print(bag)
+plot(varImp(bag))
+
+#prediction in training dataset
+p1 <- predict(bag, trainNFL, type = 'raw')
+confusionMatrix(factor(p1), trainNFL$homewon, positive = '1')
+
+#prediction in testing dataset
+p2 <- predict(bag, testNFL, type = 'raw')
+confusionMatrix(factor(p2), testNFL$homewon, positive = '1')
+
+
+# ROC for training dataset
+p1 <- predict(bag, trainNFL, type = 'prob')
+r <- multiclass.roc(trainNFL$homewon, p1$`1`, percent = TRUE)
+roc <- r[['rocs']]
+r1 <- roc[[1]]
+plot.roc(r1,
+         col = 'red',
+         lwd = 5,
+         main = 'ROC Curve for Train Data with Bagged Classification Tree',
+         cex.title = 0.8,
+         print.auc = T,
+         auc.polygon = T,
+         grid = c(0.1, 0.2),
+         grid.col = c('green', 'red'),
+         max.auc.polygon = T,
+         auc.polygon.col = 'lightblue',
+         print.thres = "best",
+         print.thres.best.method = "closest.topleft",
+         print.auc.adj=c(0.5,8.5))
+
+
+# ROC for testing dataset
+p2 <- predict(bag, testNFL, type = 'prob')
+r <- multiclass.roc(testNFL$homewon, p2$`1`, percent = TRUE)
+roc <- r[['rocs']]
+r2 <- roc[[1]]
+plot.roc(r2,
+         col = 'red',
+         lwd = 5,
+         main = 'ROC Curve for Testing Data with Bagged Classification Tree',
+         cex.title = 0.8,
+         print.auc = T,
+         auc.polygon = T,
+         grid = c(0.1, 0.2),
+         grid.col = c('green', 'red'),
+         max.auc.polygon = T,
+         auc.polygon.col = 'lightblue',
+         print.thres = "best",
+         print.thres.best.method = "closest.topleft",
+         print.auc.adj=c(0.5,8.5))
+
+
+# Random forest model
+set.seed(1234)
+forest <- train(homewon ~ week + div_game + home_opening_kickoff + temp_new + humidity + avg_age + 
+           active + stad_elev_ft + G + W, 
+                data = trainNFL,
+                method = "rf",
+                trControl = cvcontrol,
+                importance = TRUE)
+
+#printing model summary and variable importance plot
+print(forest)
+plot(varImp(forest))
+
+#predicting in training dataset
+p1 <- predict(forest, trainNFL, type = 'prob')
+p1 <- ifelse(p1[,2] > 0.4, 1, 0)
+confusionMatrix(factor(p1), trainNFL$homewon, positive = '1')
+
+#predicting in testing dataset
+p2 <- predict(forest, testNFL, type = 'raw')
+confusionMatrix(factor(p2), testNFL$homewon, positive = '1')
+
+# ROC for training dataset
+p1 <- predict(forest, trainNFL, type = 'prob')
+r <- multiclass.roc(trainNFL$homewon, p1$`1`, percent = TRUE)
+roc <- r[['rocs']]
+r1 <- roc[[1]]
+plot.roc(r1,
+         col = 'red',
+         lwd = 5,
+         main = 'ROC Curve for Train Data with Random Forest Model & 500 Trees',
+         cex.title = 0.8,
+         print.auc = T,
+         auc.polygon = T,
+         grid = c(0.1, 0.2),
+         grid.col = c('green', 'red'),
+         max.auc.polygon = T,
+         auc.polygon.col = 'lightblue',
+         print.thres = "best",
+         print.thres.best.method = "closest.topleft",
+         print.auc.adj=c(0.5,8.5))
+
+
+# ROC for testing dataset
+p2 <- predict(forest, testNFL, type = 'prob')
+r <- multiclass.roc(testNFL$homewon, p2$`1`, percent = TRUE)
+roc <- r[['rocs']]
+r2 <- roc[[1]]
+plot.roc(r2,
+         col = 'red',
+         lwd = 5,
+         main = 'ROC Curve for Testing Data with Random Forest Model & 500 Trees',
+         cex.title = 0.8,
+         print.auc = T,
+         auc.polygon = T,
+         grid = c(0.1, 0.2),
+         grid.col = c('green', 'red'),
+         max.auc.polygon = T,
+         auc.polygon.col = 'lightblue',
+         print.thres = "best",
+         print.thres.best.method = "closest.topleft",
+         print.auc.adj=c(0.5,8.5))
+
+# Explain predictions, with only first 3 observations
+# 5 variables and with the explained plot
+explainer <- lime(testNFL[1:4,], forest, n_bins = 3)
+explanation <- explain(x = testNFL[1:4,], 
+                        explainer = explainer, 
+                        n_features = 3,
+                        n_labels = "1")
+plot_features(explanation)
+
+# Boosting
+set.seed(1234)
+boo <- train(homewon ~ week + div_game + home_opening_kickoff + temp_new + humidity + avg_age + 
+           active + stad_elev_ft + G + W, 
+             data = trainNFL,
+             method = "xgbTree",   
+             trControl = cvcontrol,
+             tuneGrid = expand.grid(nrounds = 500,
+                                    max_depth = 4,
+                                    eta = 0.25,
+                                    gamma = 1.0,
+                                    colsample_bytree = 1,
+                                    min_child_weight = 1,
+                                    subsample = 1))
+
+#printing model summary and variable importance plot
+print(boo)
+plot(varImp(boo))
+
+#predicting in training dataset
+p1 <- predict(boo, trainNFL, type = 'raw')
+confusionMatrix(factor(p1), trainNFL$homewon, positive = '1')
+
+#predicting in testing dataset
+p2 <- predict(boo, testNFL, type = 'prob')
+p2 <- ifelse(p2[,2] > 0.4, 1, 0)
+confusionMatrix(factor(p2), testNFL$homewon, positive = '1')
+
+# ROC for training dataset
+p1 <- predict(boo, trainNFL, type = 'prob')
+r <- multiclass.roc(trainNFL$homewon, p1$`1`, percent = TRUE)
+roc <- r[['rocs']]
+r1 <- roc[[1]]
+plot.roc(r1,
+         col = 'red',
+         lwd = 5,
+         main = 'ROC Curve for Train Data w/ Extreme Gradient Boosting & 500 Rounds',
+         cex.title = 0.8,
+         print.auc = T,
+         auc.polygon = T,
+         grid = c(0.1, 0.2),
+         grid.col = c('green', 'red'),
+         max.auc.polygon = T,
+         auc.polygon.col = 'lightblue',
+         print.thres = "best",
+         print.thres.best.method = "closest.topleft",
+         print.auc.adj=c(0.5,8.5))
+
+
+# ROC for testing dataset
+p2 <- predict(boo, testNFL, type = 'prob')
+r <- multiclass.roc(testNFL$homewon, p2$`1`, percent = TRUE)
+roc <- r[['rocs']]
+r2 <- roc[[1]]
+plot.roc(r2,
+         col = 'red',
+         lwd = 5,
+         main = 'ROC Curve for Testing Data w/ Extreme Gradient Boosting & 500 Rounds',
+         cex.title = 0.8,
+         print.auc = T,
+         auc.polygon = T,
+         grid = c(0.1, 0.2),
+         grid.col = c('green', 'red'),
+         max.auc.polygon = T,
+         auc.polygon.col = 'lightblue',
+         print.thres = "best",
+         print.thres.best.method = "closest.topleft",
+         print.auc.adj=c(0.5,8.5))
